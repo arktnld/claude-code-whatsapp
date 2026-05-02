@@ -248,30 +248,36 @@ func (b *Bridge) broadcastToWS(msg IncomingMessage) {
 	}
 }
 
-// SendMessage sends a message via WhatsApp
-func (b *Bridge) SendMessage(msg OutgoingMessage) error {
+// SendResponse wraps message ID from a sent message
+type SendResponse struct {
+	MessageID string `json:"message_id"`
+}
+
+// SendMessage sends a message via WhatsApp and returns the message ID
+func (b *Bridge) SendMessage(msg OutgoingMessage) (SendResponse, error) {
 	jid, err := types.ParseJID(msg.To)
 	if err != nil {
-		return fmt.Errorf("invalid JID %s: %w", msg.To, err)
+		return SendResponse{}, fmt.Errorf("invalid JID %s: %w", msg.To, err)
 	}
 
 	ctx := context.Background()
+	var resp whatsmeow.SendResponse
 
 	switch msg.Type {
 	case "text":
-		_, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
+		resp, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
 			Conversation: proto.String(msg.Text),
 		})
 	case "image":
 		data, readErr := os.ReadFile(msg.MediaPath)
 		if readErr != nil {
-			return fmt.Errorf("failed to read image: %w", readErr)
+			return SendResponse{}, fmt.Errorf("failed to read image: %w", readErr)
 		}
 		uploaded, uploadErr := b.client.Upload(ctx, data, whatsmeow.MediaImage)
 		if uploadErr != nil {
-			return fmt.Errorf("failed to upload image: %w", uploadErr)
+			return SendResponse{}, fmt.Errorf("failed to upload image: %w", uploadErr)
 		}
-		_, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
+		resp, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
 			ImageMessage: &waE2E.ImageMessage{
 				Caption:       proto.String(msg.Caption),
 				URL:           proto.String(uploaded.URL),
@@ -286,13 +292,13 @@ func (b *Bridge) SendMessage(msg OutgoingMessage) error {
 	case "document":
 		data, readErr := os.ReadFile(msg.MediaPath)
 		if readErr != nil {
-			return fmt.Errorf("failed to read document: %w", readErr)
+			return SendResponse{}, fmt.Errorf("failed to read document: %w", readErr)
 		}
 		uploaded, uploadErr := b.client.Upload(ctx, data, whatsmeow.MediaDocument)
 		if uploadErr != nil {
-			return fmt.Errorf("failed to upload document: %w", uploadErr)
+			return SendResponse{}, fmt.Errorf("failed to upload document: %w", uploadErr)
 		}
-		_, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
+		resp, err = b.client.SendMessage(ctx, jid, &waE2E.Message{
 			DocumentMessage: &waE2E.DocumentMessage{
 				Caption:       proto.String(msg.Caption),
 				URL:           proto.String(uploaded.URL),
@@ -306,10 +312,82 @@ func (b *Bridge) SendMessage(msg OutgoingMessage) error {
 			},
 		})
 	default:
-		return fmt.Errorf("unsupported message type: %s", msg.Type)
+		return SendResponse{}, fmt.Errorf("unsupported message type: %s", msg.Type)
 	}
 
+	if err != nil {
+		return SendResponse{}, err
+	}
+	return SendResponse{MessageID: resp.ID}, nil
+}
+
+// EditMessage edits a previously sent message
+func (b *Bridge) EditMessage(chatJID, messageID, newText string) error {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+	editMsg := b.client.BuildEdit(jid, messageID, &waE2E.Message{
+		Conversation: proto.String(newText),
+	})
+	_, err = b.client.SendMessage(context.Background(), jid, editMsg)
 	return err
+}
+
+// ReactToMessage sends a reaction emoji to a message
+func (b *Bridge) ReactToMessage(chatJID, senderJID, messageID, reaction string) error {
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID: %w", err)
+	}
+	sender, err := types.ParseJID(senderJID)
+	if err != nil {
+		return fmt.Errorf("invalid sender JID: %w", err)
+	}
+	reactMsg := b.client.BuildReaction(chat, sender, messageID, reaction)
+	_, err = b.client.SendMessage(context.Background(), chat, reactMsg)
+	return err
+}
+
+// RevokeMessage deletes a previously sent message
+func (b *Bridge) RevokeMessage(chatJID, messageID string) error {
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+	_, err = b.client.RevokeMessage(context.Background(), chat, messageID)
+	return err
+}
+
+// MarkRead marks messages as read
+func (b *Bridge) MarkRead(chatJID, senderJID, messageID string, timestamp int64) error {
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID: %w", err)
+	}
+	sender, err := types.ParseJID(senderJID)
+	if err != nil {
+		return fmt.Errorf("invalid sender JID: %w", err)
+	}
+	ts := time.Unix(timestamp, 0)
+	return b.client.MarkRead(context.Background(), []types.MessageID{messageID}, ts, chat, sender)
+}
+
+// CreatePoll sends a poll message
+func (b *Bridge) CreatePoll(chatJID, question string, options []string, maxSelections int) (SendResponse, error) {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return SendResponse{}, fmt.Errorf("invalid JID: %w", err)
+	}
+	if maxSelections <= 0 {
+		maxSelections = 1
+	}
+	pollMsg := b.client.BuildPollCreation(question, options, maxSelections)
+	resp, err := b.client.SendMessage(context.Background(), jid, pollMsg)
+	if err != nil {
+		return SendResponse{}, err
+	}
+	return SendResponse{MessageID: resp.ID}, nil
 }
 
 // SetupHTTP configures HTTP routes
@@ -338,11 +416,12 @@ func (b *Bridge) SetupHTTP() http.Handler {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := b.SendMessage(msg); err != nil {
+		resp, err := b.SendMessage(msg)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "sent", "message_id": resp.MessageID})
 	})
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -392,8 +471,142 @@ func (b *Bridge) SetupHTTP() http.Handler {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		b.client.SendChatPresence(jid, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+		b.client.SendChatPresence(context.Background(), jid, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 		json.NewEncoder(w).Encode(map[string]string{"status": "typing"})
+	})
+
+	// Edit a previously sent message
+	mux.HandleFunc("/edit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Chat      string `json:"chat"`
+			MessageID string `json:"message_id"`
+			Text      string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := b.EditMessage(req.Chat, req.MessageID, req.Text); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "edited"})
+	})
+
+	// React to a message
+	mux.HandleFunc("/react", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Chat      string `json:"chat"`
+			Sender    string `json:"sender"`
+			MessageID string `json:"message_id"`
+			Reaction  string `json:"reaction"` // emoji, empty string to remove
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := b.ReactToMessage(req.Chat, req.Sender, req.MessageID, req.Reaction); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "reacted"})
+	})
+
+	// Revoke (delete) a sent message
+	mux.HandleFunc("/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Chat      string `json:"chat"`
+			MessageID string `json:"message_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := b.RevokeMessage(req.Chat, req.MessageID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
+	})
+
+	// Mark message as read
+	mux.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Chat      string `json:"chat"`
+			Sender    string `json:"sender"`
+			MessageID string `json:"message_id"`
+			Timestamp int64  `json:"timestamp"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := b.MarkRead(req.Chat, req.Sender, req.MessageID, req.Timestamp); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "read"})
+	})
+
+	// Create a poll
+	mux.HandleFunc("/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Chat          string   `json:"chat"`
+			Question      string   `json:"question"`
+			Options       []string `json:"options"`
+			MaxSelections int      `json:"max_selections"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp, err := b.CreatePoll(req.Chat, req.Question, req.Options, req.MaxSelections)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "sent", "message_id": resp.MessageID})
+	})
+
+	// Pair via phone code (no QR needed)
+	mux.HandleFunc("/pair-phone", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Phone string `json:"phone"` // e.g. +5511999999999
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		code, err := b.client.PairPhone(context.Background(), req.Phone, true, whatsmeow.PairClientChrome, "Claude Code WhatsApp")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "pairing", "code": code})
 	})
 
 	return mux

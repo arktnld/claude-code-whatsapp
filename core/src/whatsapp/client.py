@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 import structlog
@@ -57,8 +57,8 @@ class BridgeClient:
         async with self._session.get(f"{self.base_url}/status") as resp:
             return await resp.json()
 
-    async def send_message(self, msg: OutgoingMessage) -> bool:
-        """Send message via bridge."""
+    async def send_message(self, msg: OutgoingMessage) -> Optional[str]:
+        """Send message via bridge. Returns message_id or None."""
         payload = {
             "to": msg.to,
             "type": msg.type,
@@ -70,14 +70,99 @@ class BridgeClient:
             async with self._session.post(
                 f"{self.base_url}/send", json=payload
             ) as resp:
-                return resp.status == 200
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("message_id")
+                return None
         except Exception as e:
             logger.error("Failed to send message", error=str(e))
+            return None
+
+    async def send_text(self, to: str, text: str) -> Optional[str]:
+        """Send text message. Returns message_id."""
+        return await self.send_message(OutgoingMessage(to=to, type="text", text=text))
+
+    async def edit_message(self, chat: str, message_id: str, new_text: str) -> bool:
+        """Edit a previously sent message."""
+        try:
+            async with self._session.post(
+                f"{self.base_url}/edit",
+                json={"chat": chat, "message_id": message_id, "text": new_text},
+            ) as resp:
+                return resp.status == 200
+        except Exception as e:
+            logger.error("Failed to edit message", error=str(e))
             return False
 
-    async def send_text(self, to: str, text: str) -> bool:
-        """Send text message shortcut."""
-        return await self.send_message(OutgoingMessage(to=to, type="text", text=text))
+    async def react(self, chat: str, sender: str, message_id: str, reaction: str) -> bool:
+        """React to a message with an emoji. Empty string removes reaction."""
+        try:
+            async with self._session.post(
+                f"{self.base_url}/react",
+                json={
+                    "chat": chat,
+                    "sender": sender,
+                    "message_id": message_id,
+                    "reaction": reaction,
+                },
+            ) as resp:
+                return resp.status == 200
+        except Exception as e:
+            logger.error("Failed to react", error=str(e))
+            return False
+
+    async def revoke_message(self, chat: str, message_id: str) -> bool:
+        """Delete a previously sent message."""
+        try:
+            async with self._session.post(
+                f"{self.base_url}/revoke",
+                json={"chat": chat, "message_id": message_id},
+            ) as resp:
+                return resp.status == 200
+        except Exception as e:
+            logger.error("Failed to revoke message", error=str(e))
+            return False
+
+    async def mark_read(
+        self, chat: str, sender: str, message_id: str, timestamp: int
+    ) -> bool:
+        """Mark a message as read."""
+        try:
+            async with self._session.post(
+                f"{self.base_url}/read",
+                json={
+                    "chat": chat,
+                    "sender": sender,
+                    "message_id": message_id,
+                    "timestamp": timestamp,
+                },
+            ) as resp:
+                return resp.status == 200
+        except Exception as e:
+            logger.error("Failed to mark read", error=str(e))
+            return False
+
+    async def create_poll(
+        self, chat: str, question: str, options: List[str], max_selections: int = 1
+    ) -> Optional[str]:
+        """Create a poll. Returns message_id."""
+        try:
+            async with self._session.post(
+                f"{self.base_url}/poll",
+                json={
+                    "chat": chat,
+                    "question": question,
+                    "options": options,
+                    "max_selections": max_selections,
+                },
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("message_id")
+                return None
+        except Exception as e:
+            logger.error("Failed to create poll", error=str(e))
+            return None
 
     async def send_typing(self, to: str) -> None:
         """Send typing indicator."""

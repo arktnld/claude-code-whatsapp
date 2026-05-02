@@ -100,15 +100,25 @@ class MessageOrchestrator:
 
         logger.info("Processing text", user_id=user_id, length=len(text))
 
+        # Mark user message as read
+        await self.client.mark_read(chat, msg.from_jid, msg.message_id, msg.timestamp)
+
+        # React with hourglass to show we're processing
+        await self.client.react(chat, msg.from_jid, msg.message_id, "\u23f3")
+
         # Typing indicator
         await self.client.send_typing(chat)
 
-        # Send progress
-        await self.client.send_text(chat, "Working...")
+        # Send "Working..." — will be edited with final response
+        progress_msg_id = await self.client.send_text(chat, "Working...")
 
         claude_integration = self.deps.get("claude_integration")
         if not claude_integration:
-            await self.client.send_text(chat, "Claude integration not available.")
+            if progress_msg_id:
+                await self.client.edit_message(chat, progress_msg_id, "Claude integration not available.")
+            else:
+                await self.client.send_text(chat, "Claude integration not available.")
+            await self.client.react(chat, msg.from_jid, msg.message_id, "")
             return
 
         user_data = self._get_user_data(user_id)
@@ -140,16 +150,28 @@ class MessageOrchestrator:
 
             user_data["claude_session_id"] = claude_response.session_id
 
-            # Format and send response
+            # Format response
             content = claude_response.content
             if claude_response.interrupted:
                 content = (content or "") + "\n\n_(Interrupted)_"
 
-            messages = format_for_whatsapp(content)
-            for chunk in messages:
-                await self.client.send_text(chat, chunk)
-                if len(messages) > 1:
+            chunks = format_for_whatsapp(content)
+
+            # Edit "Working..." with first chunk (or full response)
+            if progress_msg_id and chunks:
+                await self.client.edit_message(chat, progress_msg_id, chunks[0])
+                # Send remaining chunks as new messages
+                for chunk in chunks[1:]:
+                    await self.client.send_text(chat, chunk)
                     await asyncio.sleep(0.5)
+            else:
+                for chunk in chunks:
+                    await self.client.send_text(chat, chunk)
+                    if len(chunks) > 1:
+                        await asyncio.sleep(0.5)
+
+            # React with checkmark on success
+            await self.client.react(chat, msg.from_jid, msg.message_id, "\u2705")
 
             # Store interaction
             storage = self.deps.get("storage")
@@ -167,7 +189,13 @@ class MessageOrchestrator:
 
         except Exception as e:
             logger.error("Claude failed", error=str(e), user_id=user_id)
-            await self.client.send_text(chat, f"Error: {str(e)[:500]}")
+            # Edit progress to show error, react with X
+            error_text = f"Error: {str(e)[:500]}"
+            if progress_msg_id:
+                await self.client.edit_message(chat, progress_msg_id, error_text)
+            else:
+                await self.client.send_text(chat, error_text)
+            await self.client.react(chat, msg.from_jid, msg.message_id, "\u274c")
         finally:
             heartbeat.cancel()
             self._active_requests.pop(user_id, None)
@@ -293,19 +321,28 @@ class MessageOrchestrator:
             await self.client.send_text(chat, f"No repos in {base}")
             return
 
-        current_dir = user_data.get("current_directory", base)
-        current_name = current_dir.name if current_dir != base else None
-
-        lines = []
-        for d in entries:
-            is_git = (d / ".git").is_dir()
-            icon = "git" if is_git else "dir"
-            marker = " <--" if d.name == current_name else ""
-            lines.append(f"[{icon}] {d.name}/{marker}")
-
-        await self.client.send_text(
-            chat, "*Repos*\n\n" + "\n".join(lines) + "\n\nUse: /repo <name>"
-        )
+        # Use poll for interactive repo selection (max 12 options in WhatsApp)
+        repo_names = [d.name for d in entries[:12]]
+        if len(entries) <= 12:
+            await self.client.create_poll(
+                chat=chat,
+                question="Switch to project:",
+                options=repo_names,
+                max_selections=1,
+            )
+        else:
+            # Too many repos for poll, fallback to text list
+            current_dir = user_data.get("current_directory", base)
+            current_name = current_dir.name if current_dir != base else None
+            lines = []
+            for d in entries:
+                is_git = (d / ".git").is_dir()
+                icon = "git" if is_git else "dir"
+                marker = " <--" if d.name == current_name else ""
+                lines.append(f"[{icon}] {d.name}/{marker}")
+            await self.client.send_text(
+                chat, "*Repos*\n\n" + "\n".join(lines) + "\n\nUse: /repo <name>"
+            )
 
     # --- User data store (in-memory, per user_id) ---
 
