@@ -5,8 +5,7 @@ Adapted from claude-code-telegram orchestrator for WhatsApp.
 
 import asyncio
 import time
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 
@@ -110,7 +109,9 @@ class MessageOrchestrator:
         await self.client.send_typing(chat)
 
         # Send "Working..." — will be edited with final response
+        # Track send time for WhatsApp's 15-minute edit window
         progress_msg_id = await self.client.send_text(chat, "Working...")
+        progress_sent_at = time.monotonic()
 
         claude_integration = self.deps.get("claude_integration")
         if not claude_integration:
@@ -157,10 +158,13 @@ class MessageOrchestrator:
 
             chunks = format_for_whatsapp(content)
 
-            # Edit "Working..." with first chunk (or full response)
-            if progress_msg_id and chunks:
+            # WhatsApp allows editing messages only within 15 minutes.
+            # If Claude took longer, fall back to sending a new message.
+            elapsed = time.monotonic() - progress_sent_at
+            can_edit = progress_msg_id and elapsed < 14 * 60  # 14min safety margin
+
+            if can_edit and chunks:
                 await self.client.edit_message(chat, progress_msg_id, chunks[0])
-                # Send remaining chunks as new messages
                 for chunk in chunks[1:]:
                     await self.client.send_text(chat, chunk)
                     await asyncio.sleep(0.5)
@@ -189,9 +193,10 @@ class MessageOrchestrator:
 
         except Exception as e:
             logger.error("Claude failed", error=str(e), user_id=user_id)
-            # Edit progress to show error, react with X
             error_text = f"Error: {str(e)[:500]}"
-            if progress_msg_id:
+            elapsed = time.monotonic() - progress_sent_at
+            can_edit = progress_msg_id and elapsed < 14 * 60
+            if can_edit:
                 await self.client.edit_message(chat, progress_msg_id, error_text)
             else:
                 await self.client.send_text(chat, error_text)
