@@ -76,14 +76,34 @@ class WhatsAppBot:
             is_command=msg.is_command,
         )
 
-        # Auth check
-        auth_manager = self.deps.get("auth_manager")
-        if auth_manager:
-            allowed_phones = self.settings.allowed_phones
-            if allowed_phones and phone not in allowed_phones:
-                logger.warning("Unauthorized phone", phone=phone)
-                await self.client.send_text(msg.chat, "Not authorized.")
-                return
+        # Block group messages (double-check — bridge should filter these)
+        if "@g.us" in msg.chat or "broadcast" in msg.chat:
+            logger.debug("Ignoring group/broadcast message", chat=msg.chat)
+            return
+
+        # Auth check — only allowed phones. Silent drop for unknown numbers
+        # (don't respond to strangers to avoid exposing bot existence)
+        allowed_phones = self.settings.allowed_phones
+        if allowed_phones and phone not in allowed_phones:
+            logger.warning("Unauthorized phone dropped silently", phone=phone)
+            return
+
+        # Ensure responses go to sender only, never to a different chat
+        if msg.from_jid != msg.chat:
+            logger.warning(
+                "Sender JID != chat JID, forcing reply to sender",
+                from_jid=msg.from_jid,
+                chat=msg.chat,
+            )
+            msg = IncomingMessage(
+                type=msg.type,
+                from_jid=msg.from_jid,
+                chat=msg.from_jid,  # force reply to sender
+                message_id=msg.message_id,
+                timestamp=msg.timestamp,
+                push_name=msg.push_name,
+                content=msg.content,
+            )
 
         # Rate limit check
         rate_limiter = self.deps.get("rate_limiter")

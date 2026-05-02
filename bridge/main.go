@@ -139,6 +139,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		return
 	}
 
+	// Skip group messages — only accept private (1:1) chats
+	if msg.Info.Chat.Server == "g.us" || msg.Info.Chat.Server == "broadcast" {
+		return
+	}
+
 	incoming := IncomingMessage{
 		Type:      "message",
 		From:      msg.Info.Sender.String(),
