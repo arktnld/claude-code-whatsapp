@@ -1,5 +1,10 @@
 # Claude Code WhatsApp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Release](https://img.shields.io/github/v/release/arktnld/claude-code-whatsapp)](https://github.com/arktnld/claude-code-whatsapp/releases)
+
 WhatsApp bot that connects to [Claude Code](https://claude.ai/code). Send a message and Claude reads, edits, and runs code in your projects.
 
 ## How it works
