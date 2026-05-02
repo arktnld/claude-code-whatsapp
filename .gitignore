@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Go
+bridge/bin/
+bridge/whatsapp.db
+
+# Data
+data/
+*.db
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Media temp
+/tmp/claude-whatsapp/
+
+# Poetry
+poetry.lock
+
+# Subprojects (reference only)
+Baileys/
+whatsmeow/
+claude-code-telegram/
